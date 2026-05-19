@@ -1,0 +1,2 @@
+[console_scripts]
+toolbox = mcp_toolbox.cli:main
