@@ -2,6 +2,7 @@ import sys
 import os
 import urllib.request
 import platform
+import subprocess
 from pathlib import Path
 from setuptools import setup, find_packages
 from setuptools.command.build_py import build_py
@@ -34,62 +35,77 @@ PLATFORM_MAPS = {
     }
 }
 
-def get_target_platform():
-    """Resolves the target platform from environment variables or auto-detects local host."""
-    target = os.environ.get("MCP_TOOLBOX_PLATFORM")
-    if target:
-        if target not in PLATFORM_MAPS:
-            raise ValueError(f"Unsupported target platform override: '{target}'. Must be one of: {list(PLATFORM_MAPS.keys())}")
-        return target
-        
-    # Fallback to auto-detection
-    os_type = platform.system().lower()
-    arch = platform.machine()
-    
-    if os_type == "darwin":
-        cpu_key = "arm64" if "arm" in arch.lower() else "amd64"
-        return f"darwin-{cpu_key}"
-    elif os_type == "windows":
-        return "windows-amd64"
-    else:
-        return "linux-amd64"
-
-TARGET_PLATFORM = get_target_platform()
-PLATFORM_CONFIG = PLATFORM_MAPS[TARGET_PLATFORM]
-
 class CustomBuildPy(build_py):
-    """Intercepts 'python3 -m build' to download only the target Go binary from GCS."""
+    """Child build step: downloads ONLY the single target platform Go binary from GCS."""
     def run(self):
-        # 1. Run standard copy
         super().run()
         
-        # 2. Create the target bin directory
+        target_platform = os.environ.get("MCP_TOOLBOX_PLATFORM")
+        if not target_platform:
+            # Avoid downloading in parent sdist phase
+            return
+            
+        config = PLATFORM_MAPS[target_platform]
         build_lib = Path(self.build_lib) / "mcp_toolbox" / "bin"
         build_lib.mkdir(parents=True, exist_ok=True)
         
-        # 3. Download ONLY the matching target Go binary
-        gcs_path = PLATFORM_CONFIG["gcs_path"]
-        bin_name = PLATFORM_CONFIG["bin_name"]
+        gcs_path = config["gcs_path"]
+        bin_name = config["bin_name"]
         
         url = f"{GCS_BASE_URL}/v{VERSION}/{gcs_path}"
         target_file = build_lib / bin_name
             
-        print(f"[{TARGET_PLATFORM}] Downloading and embedding native Go binary from GCS...", file=sys.stderr)
+        print(f"[{target_platform}] Downloading native Go binary from GCS...", file=sys.stderr)
         try:
             urllib.request.urlretrieve(url, target_file)
-            # Set executable privileges on Unix
-            if not TARGET_PLATFORM.startswith("windows"):
+            if not target_platform.startswith("windows"):
                 os.chmod(target_file, 0o755)
         except Exception as e:
-            print(f"Error fetching binary for {TARGET_PLATFORM}: {e}", file=sys.stderr)
+            print(f"Error fetching binary for {target_platform}: {e}", file=sys.stderr)
             raise e
 
 class CustomBdistWheel(bdist_wheel):
-    """Forces setuptools to compile a platform-specific native wheel instead of pure-Python."""
+    """Orchestrates multiple platform builds or tags a single native wheel."""
+    def run(self):
+        target_platform = os.environ.get("MCP_TOOLBOX_PLATFORM")
+        
+        if not target_platform:
+            # Parent Mode: Spawn clean, isolated subprocesses for each target platform
+            print("Parent Build: Spawning isolated builds for all platform wheels...", file=sys.stderr)
+            
+            for plat in PLATFORM_MAPS.keys():
+                wheel_tag = PLATFORM_MAPS[plat]["wheel_tag"]
+                print(f"\n---> Spawning build for {plat} ({wheel_tag})...", file=sys.stderr)
+                
+                # Force absolute path resolution for dist-dir
+                absolute_dist_dir = os.path.abspath(self.dist_dir)
+                
+                cmd = [
+                    sys.executable, "setup.py",
+                    "build", "--build-base", f"build/build-{plat}", # Isolate Go compilation/staging folders
+                    "bdist_wheel",
+                    "--bdist-dir", f"build/bdist-{plat}",
+                    "--dist-dir", absolute_dist_dir,               # Forward PEP 517 compiler target directory
+                    "--plat-name", wheel_tag
+                ]
+                subprocess.run(
+                    cmd,
+                    env={**os.environ, "MCP_TOOLBOX_PLATFORM": plat},
+                    check=True
+                )
+            print("\nParent Build: All platform-specific wheels built successfully!", file=sys.stderr)
+            return
+            
+        # Child Mode: Delegate to standard setuptools bdist_wheel
+        super().run()
+
     def get_tag(self):
-        # Return the native PEP 425 tag matching our target Go binary
-        tag = PLATFORM_CONFIG["wheel_tag"]
-        return "py3", "none", tag
+        # Ensures correct platform tag matching the current child target
+        target_platform = os.environ.get("MCP_TOOLBOX_PLATFORM")
+        if target_platform:
+            tag = PLATFORM_MAPS[target_platform]["wheel_tag"]
+            return "py3", "none", tag
+        return super().get_tag()
 
 setup(
     name="mcp-toolbox",
@@ -104,7 +120,7 @@ setup(
     package_dir={"": "uv/src"},
     cmdclass={
         'build_py': CustomBuildPy,
-        'bdist_wheel': CustomBdistWheel, # Forces correct platform tags (e.g. win_amd64, manylinux2014_x86_64)
+        'bdist_wheel': CustomBdistWheel,
     },
     entry_points={
         'console_scripts': [
