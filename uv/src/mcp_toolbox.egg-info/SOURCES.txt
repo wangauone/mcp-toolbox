@@ -1,0 +1,11 @@
+LICENSE
+README.md
+pyproject.toml
+setup.py
+uv/src/mcp_toolbox/__init__.py
+uv/src/mcp_toolbox/cli.py
+uv/src/mcp_toolbox.egg-info/PKG-INFO
+uv/src/mcp_toolbox.egg-info/SOURCES.txt
+uv/src/mcp_toolbox.egg-info/dependency_links.txt
+uv/src/mcp_toolbox.egg-info/entry_points.txt
+uv/src/mcp_toolbox.egg-info/top_level.txt
