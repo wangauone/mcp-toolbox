@@ -13,11 +13,30 @@ try:
             _bdist_wheel.finalize_options(self)
             self.root_is_pure = False
             self.root_is_purelib = False
+            plat = os.environ.get("TOOLBOX_PLAT_NAME")
+            if plat:
+                self.plat_name = plat
+                self.plat_name_supplied = True
+
+        def get_tag(self):
+            # Package ships a Go binary, not a Python extension — keep
+            # the platform tag but force py3-none for python/abi.
+            _, _, plat = _bdist_wheel.get_tag(self)
+            return "py3", "none", plat
+
+        def run(self):
+            download_binary()
+            super().run()
 except ImportError:
     print("Warning: wheel package not found, platform tag might be incorrect.")
     bdist_wheel = None
 
 def get_platform_details():
+    env_os = os.environ.get("TOOLBOX_TARGET_OS")
+    env_arch = os.environ.get("TOOLBOX_TARGET_ARCH")
+    if env_os and env_arch:
+        return env_os, env_arch
+
     system = platform.system()
     machine = platform.machine()
     os_part = system.lower()
@@ -82,8 +101,6 @@ def download_binary():
     st = os.stat(dest_path)
     os.chmod(dest_path, st.st_mode | stat.S_IEXEC)
     return bin_name
-
-binary_name = download_binary()
 
 setup(
     packages=find_packages(where="src"),
